@@ -1,5 +1,4 @@
 import torch
-from torch.nn import functional as F
 import Model.Gpt as gpt
 import Model.config as config
 import Model.Embeddings as emb

@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import tiktoken
-#import config
+from transformers import GPT2LMHeadModel
 
 tokenizer = tiktoken.get_encoding("gpt2")
 
@@ -13,6 +13,13 @@ def get_single_encoding(cfg, pos):
 
 def get_positional_encoding(cfg):
     return torch.FloatTensor([get_single_encoding(cfg, i) for i in range(cfg.context_length)]).unsqueeze(0)
+# def get_single_encoding(cfg, pos):
+#     return [np.sin(pos / np.power(10000, i / cfg.n_embd)) if i % 2 == 0 else np.cos(
+#         pos / np.power(10000, (i - 1) / cfg.n_embd)) for i in range(cfg.n_embd)]
+
+
+# def get_positional_encoding(cfg):
+#     return torch.FloatTensor([get_single_encoding(cfg, i) for i in range(cfg.block_size)]).unsqueeze(0)
 
 
 def encode(text):
@@ -34,7 +41,8 @@ def data_prep(input_file='Shakespeare_input.txt', output_file='shakespeare_token
     torch.save(data_tensor, output_file)
     print("Dataset has been tokenized into ", len(data_tensor), " tokens")
 
-#parameters = config.params(embedding_dimension=10, n_heads=1, n_blocks=2,
-#                           batchsize=3, context_length=20, vocab_size=4,
-#                           device='device')
-#print(get_positional_encoding(parameters).shape)
+def load_embedding_weights():
+    model = GPT2LMHeadModel.from_pretrained('gpt2')
+    we = model.transformer.wte.weight
+    torch.save(we, 'token_embedding_weights.pt')
+    print("Weights of shape", we.shape, "have been loaded")

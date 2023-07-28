@@ -5,6 +5,7 @@ import Model.config as config
 import Model.Embeddings as emb
 from tqdm import tqdm, trange
 
+# Model Parameters
 context_dimension = 512  # Time
 embedding_dimension = 768  # 192#384  # feature Channels (Should be multiple of num_heads)
 batch_size = 16 #64  # Batch
@@ -13,6 +14,7 @@ num_blocks = 12
 vocab_size = 50257
 dropout = 0.2
 
+#Training Parameters
 use_existing_model = False
 #model_name = 'shakespeare.pt'
 model_name = 'huge_bc_model.pt'

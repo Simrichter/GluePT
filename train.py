@@ -1,66 +1,94 @@
 import torch
 import math
-
 import Data
 import Model.Gpt as gpt
+import Model.Karpathy_model as Karpathy_model
 import Model.config as config
 import Model.Embeddings as emb
 from tqdm import tqdm, trange
 from torch.utils.data import DataLoader
+from torch.cuda.amp import GradScaler
+from torch import autocast
 
-# Model Parameters
-context_dimension = 128#512  # Time
-embedding_dimension = 192#768  # 192#384  # feature Channels (Should be multiple of num_heads)
-batch_size = 1  # 64  # Batch
-num_heads = 6#12  # for multi-head Attention
-num_blocks = 6#12
+import warnings
+
+warnings.filterwarnings("ignore")
+
+context_dimension = 256  # 1024  # Time
+embedding_dimension = 768  # 192  # feature Channels (Should be multiple of num_heads)
+accumulation_steps = 1  # 2
+batch_size = 32 // accumulation_steps  # (micro)Batch
+num_heads = 12  # for multi-head Attention
+num_blocks = 12
 vocab_size = 50257
-dropout = 0.2
 
-# Training Parameters
+model_name = 'mixed_bc_model'
 use_existing_model = False
-model_name = 'shakespeare.pt'
-# model_name = 'huge_bc_model.pt'
-epochs = 1
-num_workers = 1 # 32
-training_iterations = 20000  # 6000
+use_karpathy = False  # True
+compile_model = True
+# model_name = 'reg_shakespeare'
+
+# training_iterations = 5000  # 6000
 iteration_offset = 0
-eval_iters = 50
-eval_interval = 10#500
+epochs = 1
+num_workers = 4
+train_test_percentage = 0.99
+
+eval_interval = 2000  # 250 # 1000
 always_save_checkpoints = True
 eval_tolerance = 5e-2
-train_test_percentage = 0.99
-learning_rate = 1e-3  # 5e-4
-min_lr = 1e-4
+
+dropout = 0  # 0.35 #0.2
+weight_decay = 0  # 1e-1
+grad_clip = 0.0
+
+learning_rate = 7e-4
+min_lr = 8e-5
 warmup_iterations = 100
-lr_decay_iters = 50000  # training_iterations
+# lr_decay_iters = 50000  # training_iterations
 
 best_loss = 1e8
 
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
+device = torch.device('cuda:0') if torch.cuda.is_available() else 'cpu'
+
+# performance optimizations
 torch.set_float32_matmul_precision('high')
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 
 # data = torch.load('Bookcorpus/bc1.pt').to(device)
-data = torch.load('shakespeare_tokenized.pt').to(device)
+# data = torch.load('shakespeare_tokenized.pt').to(device)
 # print(data.shape)
 
-train_split = data[:int(train_test_percentage * len(data))]
-test_split = data[int(train_test_percentage * len(data)):]
+# train_split = data[:int(train_test_percentage * len(data))]
+# test_split = data[int(train_test_percentage * len(data)):]
 # print("data loaded")
-
 parameters = config.params(embedding_dimension, n_heads=num_heads, n_blocks=num_blocks,
                            batchsize=batch_size, context_length=context_dimension, vocab_size=vocab_size,
                            device=device, dropout=dropout)
+if use_karpathy:
+    k_parameters = Karpathy_model.GPTConfig(block_size=context_dimension, vocab_size=vocab_size, n_layer=num_blocks,
+                                            n_head=num_heads, n_embd=embedding_dimension, dropout=dropout, bias=False)
+    model = Karpathy_model.GPT(k_parameters).to(device)
+else:
+    model = gpt.GptModel(parameters).to(device)
+if torch.cuda.is_available() and compile_model:
+    print('compiling model')
+    model = torch.compile(model)
 
-# model = torch.compile(gpt.GptModel(parameters).to(device))
-model = gpt.GptModel(parameters).to(device)
+train_set = Data.Dataset(parameters, train=True, train_test_percentage=train_test_percentage)
+test_set = Data.Dataset(parameters, train=False, train_test_percentage=train_test_percentage)
+train_loader = DataLoader(train_set, batch_size=batch_size, num_workers=num_workers, pin_memory=True, shuffle=True)
+test_loader = DataLoader(test_set, batch_size=batch_size, num_workers=num_workers, pin_memory=True, shuffle=True)
+
 model_params = filter(lambda p: p.requires_grad, model.parameters())
-# optimizer = torch.optim.AdamW(model_params, learning_rate, foreach=False, fused=True)  # TODO Test if fused is good
-optimizer = torch.optim.AdamW(model_params, learning_rate)
+optimizer = torch.optim.AdamW(model_params, learning_rate, weight_decay=weight_decay, foreach=False,
+                              fused=True)  # TODO Test if fused is good
+scaler = GradScaler()
 loss_history = {"train": [], "test": [], "test_interval": eval_interval}
 
 if use_existing_model:
-    state = torch.load('final_{}'.format(model_name))
+    state = torch.load('final_{}.pt'.format(model_name))
     model.load_state_dict(state['state_dict'])
     optimizer.load_state_dict(state['optimizer'])
     iteration_offset = state['iteration']
@@ -70,6 +98,7 @@ if use_existing_model:
 
 
 def get_lr(it):
+    lr_decay_iters = train_loader.__len__() * epochs
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iterations:
         return learning_rate * it / warmup_iterations
@@ -93,12 +122,14 @@ def get_lr(it):
     x = torch.stack([d[i:i + context_dimension] for i in indizes]).to(device)
     y = torch.stack([d[i + 1:i + context_dimension + 1] for i in indizes]).to(device)
 
-    return x, y'''
+    return x, y
 
 
-'''@torch.no_grad()
+@torch.no_grad()
 def estimate_loss():
     model.eval()
+    #TODO torch.set_grad_enabled(False)
+    #with torch.no_grad():
     losses = torch.zeros(eval_iters)
     for k in range(eval_iters):
         X, Y = get_batch(test=True)
@@ -109,6 +140,18 @@ def estimate_loss():
     return test_loss'''
 
 
+def evaluate():
+    model.eval()
+    with torch.no_grad():
+        losses = torch.zeros(test_loader.__len__())
+        for k, batch in enumerate(test_loader):
+            X, Y = batch[0].to(device), batch[1].to(device)  # get_batch(test=True)
+            logits, loss = model(X, Y)
+            losses[k] = loss.detach()  # Changed detach() and item()
+    model.train()
+    return losses.mean()
+
+
 def save_state(iteration, checkpoint=True):
     state_to_save = {
         "state_dict": model.state_dict(),
@@ -117,82 +160,55 @@ def save_state(iteration, checkpoint=True):
         "loss_history": loss_history
     }
     if checkpoint:
-        torch.save(state_to_save, model_name)
+        torch.save(state_to_save, '{}.pt'.format(model_name))
     else:
-        torch.save(state_to_save, 'final_{}'.format(model_name))  # Used to save a model that may be overfitted
+        torch.save(state_to_save, 'final_{}.pt'.format(model_name))  # Used to save a model that may be overfitted
 
 
-'''def training_loop(iterations):
+def training_loop():  # iterations
     global best_loss
 
-    # ascii=" ▖▘▝▗▚▞█", ascii="░▒█", ascii=' >='
-    with trange(iteration_offset, iterations, initial=iteration_offset, total=iterations) as t:
-        for steps in t:
-            optimizer.zero_grad(set_to_none=True)
-            x, y = get_batch()
-            _, loss = model(x, y)
-            if (steps) % 10 == 0:
-                loss_history['train'].append(loss.item())
-            if (steps + 1) % eval_interval == 0:
-                test_loss = estimate_loss()
-                loss_history['test'].append(test_loss.item())
+    # with trange(iteration_offset, iterations, initial=iteration_offset, total=iterations) as t:
+    batch_loss = 0
+    test_loss = torch.tensor(0)  # TODO Check if this is better on gpu or cpu
+    model.train()
+    for epoch in range(epochs):
+        for step, batch in enumerate(progressbar := tqdm(train_loader)):
+            x, y = batch[0].to(device), batch[1].to(device)  # get_batch()
+            with autocast(device_type='cuda', dtype=torch.float16, enabled=True):
+                _, loss = model(x, y)
+                del x
+                del y
+                loss = loss / accumulation_steps
+                batch_loss += loss.detach()
+            scaler.scale(loss).backward()
+            del loss
+
+            if ((step + 1) % accumulation_steps == 0) or (step + 1 == len(train_loader)):
+                if (step) % 10 == 0:
+                    loss_history['train'].append(batch_loss.item())
+                progressbar.set_postfix({'train_loss': batch_loss.item(), 'test_loss': test_loss.item()})
+                if grad_clip != 0.0:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                batch_loss = 0
+
+            if (step + epoch * train_loader.__len__() + 1) % eval_interval == 0:
+                test_loss = evaluate()  # estimate_loss()
+                loss_history['test'].append(test_loss.detach().item())
                 # print("Iteration ", steps, " train loss: ", loss.item(), " test loss: ", test_loss.item())
-                t.set_postfix({'train_loss': loss.item(), 'test_loss': test_loss.item()})
+                # progressbar.set_postfix({'train_loss': loss.item(), 'test_loss': test_loss.item()})
                 if test_loss < best_loss + eval_tolerance or always_save_checkpoints:
                     best_loss = test_loss
-                    save_state(steps)
-                # else:
-                # print("test loss got larger, no checkpoint will be saved")
-
-            loss.backward()
-            optimizer.step()
-            for g in optimizer.param_groups:
-                g['lr'] = get_lr(steps)'''
-
-
-def training_loop2(iterations):
-    global best_loss
-
-    train_set = Data.Dataset(parameters, train=True, train_test_percentage=train_test_percentage)
-    test_set = Data.Dataset(parameters, train=False, train_test_percentage=train_test_percentage)
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)  # num_workers=num_workers,
-    test_loader = DataLoader(test_set, batch_size=batch_size, shuffle=True)  # num_workers=num_workers,
-    test_loss = torch.tensor(0)
-    for i in range(epochs):
-        # ascii=" ▖▘▝▗▚▞█", ascii="░▒█", ascii=' >='
-        # with trange(iteration_offset, iterations, initial=iteration_offset, total=iterations) as t:
-        for step, batch in enumerate(progressbar := tqdm(train_loader)):
-            optimizer.zero_grad(set_to_none=True)
-            x, y = batch[0].to(device), batch[1].to(device)  # get_batch()
-            _, loss = model(x, y)
-            loss.backward()
-            optimizer.step()
-            progressbar.set_postfix({'train_loss': loss.item(), 'test_loss': test_loss.item()})
-            if step % 10 == 0:
-                loss_history['train'].append(loss.item())
-            if (step + 1) % eval_interval == 0:
-                model.eval()
-                losses = torch.zeros(test_loader.__len__())
-                with torch.set_grad_enabled(False):
-                    for k, batch in enumerate(test_loader):
-                        X, Y = batch[0].to(device), batch[1].to(device)  # get_batch(test=True)
-                        logits, loss = model(X, Y)
-                        losses[k] = loss.item()
-                    test_loss = losses.mean()
-
-                    loss_history['test'].append(test_loss.item())
-                    # print("Iteration ", steps, " train loss: ", loss.item(), " test loss: ", test_loss.item())
-                    # t.set_postfix({'train_loss': loss.item(), 'test_loss': test_loss.item()})
-                    progressbar.set_postfix({'train_loss': loss.item(), 'test_loss': test_loss.item()})
-                    if test_loss < best_loss + eval_tolerance or always_save_checkpoints:
-                        best_loss = test_loss
-                        save_state(step)
-                    else:
-                        print("test loss got larger, no checkpoint will be saved")
-                    model.train()
+                    save_state(step + epoch * train_loader.__len__())
+                else:
+                    print("test loss got larger, no checkpoint will be saved")
 
             for g in optimizer.param_groups:
-                g['lr'] = get_lr(step)
+                g['lr'] = get_lr(step + epoch * train_loader.__len__())
 
 
 def param_count(module=model):
@@ -204,8 +220,8 @@ def param_count(module=model):
 start_index = 0
 
 print("Number of Parameters: ", '{0:,}'.format(param_count()))
-training_loop2(training_iterations)
-save_state(training_iterations, checkpoint=False)
+training_loop()  # training_iterations
+save_state(train_loader.__len__() * epochs, checkpoint=False)
 # print(emb.decode(model.generate(torch.tensor(emb.encode(s2)).view(1,-1).to(device), 100)[0].tolist()))
 model.eval()
 # print(emb.decode(model.generate(train_split[start_index:context_dimension-127+start_index], 100).tolist()))

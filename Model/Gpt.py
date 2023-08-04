@@ -45,6 +45,8 @@ class GptModel(nn.Module):
             # x = x.view(B * T, vs)
             # targets = y.view(B * T)
             loss = func.cross_entropy(x.view(B * T, vs), y.view(B * T), ignore_index=-1)
+            if math.isnan(loss):
+                print("Loss NaN")
         return x, loss
 
     def generate(self, x, max_length, temperature=1.0):
@@ -52,7 +54,7 @@ class GptModel(nn.Module):
             logits, loss = self(x.view(1, -1)[:, -self.T:])
             logits = logits[:, -1, :] / temperature  # .view(-1)
             probs = func.softmax(logits, dim=-1)
-            x_next = torch.multinomial(probs, num_samples=1) #torch.argmax(probs)
+            x_next = torch.multinomial(probs, num_samples=1)  # torch.argmax(probs)
             x = torch.cat((x, x_next.reshape(1)))
         return x
 
@@ -89,7 +91,8 @@ class Multi_head_attention(nn.Module):
         # B, T,
         T, C = cfg.context_length, cfg.embedding_dimension
         nh, hs = cfg.num_heads, C // cfg.num_heads
-        self.context_length = T
+        # self.context_length = T
+        self.scale_factor = 1 / math.sqrt(hs)
         self.dropout = cfg.dropout
 
         stdv = 1 / torch.sqrt(torch.tensor(C))  # (num_heads, C, head_size)#
@@ -99,11 +102,15 @@ class Multi_head_attention(nn.Module):
 
         self.linear = nn.Linear(C, C)
 
+        # self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        # if not self.flash:
+        # causal mask to ensure that attention is only applied to the left in the input sequence
         self.register_buffer('low_tri', torch.tril(torch.ones(T, T)).view(1, 1, T, T))
 
         self.drop = nn.Dropout(cfg.dropout)
 
     def forward(self, x):
+        # with torch.cuda.amp.autocast_mode.autocast(enabled=False):
         # shape(x): B, T, C (parallel, context, embedding)
         B, T, C = x.shape
         x = x[:, None, :, :]  # Introduce Dummy dimension to fit the heads dimension of weights
@@ -112,7 +119,12 @@ class Multi_head_attention(nn.Module):
         K = torch.matmul(x, self.W_k)
         V = torch.matmul(x, self.W_v)
 
-        score = torch.matmul(Q, K.transpose(-2, -1)) / self.context_length ** 0.5
+        # if self.flash:
+        # efficient attention using Flash Attention CUDA kernels
+        # result_flash = torch.nn.functional.scaled_dot_product_attention(Q, K, V, attn_mask=None, dropout_p=0, is_causal=True)#self.dropout if self.training else
+        # else:
+        score = torch.matmul(Q,
+                             K.transpose(-2, -1)) * self.scale_factor  # / Q.size(-1) ** 0.5#self.context_length ** 0.5
         weight = score.masked_fill(self.low_tri[:, :, :T, :T] == 0, float('-inf'))
         soft_score = torch.softmax(weight, dim=-1)
         result = torch.matmul(soft_score, V)  # shape: (B, num_head T, head_size)

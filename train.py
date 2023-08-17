@@ -9,6 +9,8 @@ from tqdm import tqdm, trange
 from torch.utils.data import DataLoader
 from torch.cuda.amp import GradScaler
 from torch import autocast
+from torch.nn import functional as func
+from datasets import load_dataset
 
 import warnings
 
@@ -17,12 +19,12 @@ warnings.filterwarnings("ignore")
 context_dimension = 256  # 1024  # Time
 embedding_dimension = 768  # 192  # feature Channels (Should be multiple of num_heads)
 accumulation_steps = 1  # 2
-batch_size = 32 // accumulation_steps  # (micro)Batch
+batch_size = 64 // accumulation_steps  # (micro)Batch 64
 num_heads = 12  # for multi-head Attention
 num_blocks = 12
 vocab_size = 50257
 
-model_name = 'mixed_bc_model'
+model_name = '4set_owt_model'
 use_existing_model = False
 use_karpathy = False  # True
 compile_model = True
@@ -30,21 +32,21 @@ compile_model = True
 
 # training_iterations = 5000  # 6000
 iteration_offset = 0
-epochs = 1
+epochs = 3
 num_workers = 4
-train_test_percentage = 0.99
+train_test_percentage = 0.995
 
-eval_interval = 2000  # 250 # 1000
+eval_interval = 2500  # 250 # 1000
 always_save_checkpoints = True
 eval_tolerance = 5e-2
 
 dropout = 0  # 0.35 #0.2
-weight_decay = 0  # 1e-1
-grad_clip = 0.0
+weight_decay = 1e-2
+grad_clip = 5.0
 
-learning_rate = 7e-4
-min_lr = 8e-5
-warmup_iterations = 100
+learning_rate = 2.5e-4
+min_lr = 1e-5
+warmup_iterations = 400
 # lr_decay_iters = 50000  # training_iterations
 
 best_loss = 1e8
@@ -82,7 +84,7 @@ train_loader = DataLoader(train_set, batch_size=batch_size, num_workers=num_work
 test_loader = DataLoader(test_set, batch_size=batch_size, num_workers=num_workers, pin_memory=True, shuffle=True)
 
 model_params = filter(lambda p: p.requires_grad, model.parameters())
-optimizer = torch.optim.AdamW(model_params, learning_rate, weight_decay=weight_decay, foreach=False,
+optimizer = torch.optim.AdamW(model_params, learning_rate, (0.9, 0.95), weight_decay=weight_decay, foreach=False,
                               fused=True)  # TODO Test if fused is good
 scaler = GradScaler()
 loss_history = {"train": [], "test": [], "test_interval": eval_interval}
@@ -98,7 +100,7 @@ if use_existing_model:
 
 
 def get_lr(it):
-    lr_decay_iters = train_loader.__len__() * epochs
+    lr_decay_iters = len(train_loader) * epochs
     # 1) linear warmup for warmup_iters steps
     if it < warmup_iterations:
         return learning_rate * it / warmup_iterations
@@ -112,41 +114,15 @@ def get_lr(it):
     return min_lr + coeff * (learning_rate - min_lr)
 
 
-'''def get_batch(test=False):
-    if test:
-        d = test_split
-    else:
-        d = train_split
-    # -2 because len(d) is 1 larger than the last index of d and y needs a shift to the right by 1
-    indizes = torch.randint(low=0, high=max(len(d) - context_dimension, 0), size=(batch_size,))
-    x = torch.stack([d[i:i + context_dimension] for i in indizes]).to(device)
-    y = torch.stack([d[i + 1:i + context_dimension + 1] for i in indizes]).to(device)
-
-    return x, y
-
-
-@torch.no_grad()
-def estimate_loss():
-    model.eval()
-    #TODO torch.set_grad_enabled(False)
-    #with torch.no_grad():
-    losses = torch.zeros(eval_iters)
-    for k in range(eval_iters):
-        X, Y = get_batch(test=True)
-        logits, loss = model(X, Y)
-        losses[k] = loss.item()
-    test_loss = losses.mean()
-    model.train()
-    return test_loss'''
-
-
 def evaluate():
     model.eval()
     with torch.no_grad():
         losses = torch.zeros(test_loader.__len__())
         for k, batch in enumerate(test_loader):
             X, Y = batch[0].to(device), batch[1].to(device)  # get_batch(test=True)
-            logits, loss = model(X, Y)
+            out = model(X)
+            B, T, vs = out.shape
+            loss = func.cross_entropy(out.view(B * T, vs), Y.view(B * T), ignore_index=-1)
             losses[k] = loss.detach()  # Changed detach() and item()
     model.train()
     return losses.mean()
@@ -173,42 +149,59 @@ def training_loop():  # iterations
     test_loss = torch.tensor(0)  # TODO Check if this is better on gpu or cpu
     model.train()
     for epoch in range(epochs):
-        for step, batch in enumerate(progressbar := tqdm(train_loader)):
+        for i, batch in enumerate(progressbar := tqdm(train_loader)):
+            step = i + epoch * len(train_loader)
             x, y = batch[0].to(device), batch[1].to(device)  # get_batch()
             with autocast(device_type='cuda', dtype=torch.float16, enabled=True):
-                _, loss = model(x, y)
+                out = model(x)
+
+                # print('x:', x)
+                # print('y:', y)
+                # print('pred:', )
+
+                assert (y != -1).any()
+                B, T, vs = out.shape
+                loss = func.cross_entropy(out.view(B * T, vs), y.view(B * T), ignore_index=-1) / accumulation_steps
                 del x
                 del y
-                loss = loss / accumulation_steps
-                batch_loss += loss.detach()
+                del out
+                # loss = loss / accumulation_step
             scaler.scale(loss).backward()
+            batch_loss += loss.detach()
             del loss
 
             if ((step + 1) % accumulation_steps == 0) or (step + 1 == len(train_loader)):
                 if (step) % 10 == 0:
                     loss_history['train'].append(batch_loss.item())
-                progressbar.set_postfix({'train_loss': batch_loss.item(), 'test_loss': test_loss.item()})
+                    progressbar.set_postfix(
+                        {'train_loss': batch_loss.item(), 'test_loss': test_loss.item()})  # Changed Indentation
                 if grad_clip != 0.0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
+                for g in optimizer.param_groups:
+                    g['lr'] = get_lr(step + epoch * train_loader.__len__())
                 batch_loss = 0
 
-            if (step + epoch * train_loader.__len__() + 1) % eval_interval == 0:
+            if (step + 1) % eval_interval == 0:
                 test_loss = evaluate()  # estimate_loss()
                 loss_history['test'].append(test_loss.detach().item())
                 # print("Iteration ", steps, " train loss: ", loss.item(), " test loss: ", test_loss.item())
                 # progressbar.set_postfix({'train_loss': loss.item(), 'test_loss': test_loss.item()})
                 if test_loss < best_loss + eval_tolerance or always_save_checkpoints:
                     best_loss = test_loss
-                    save_state(step + epoch * train_loader.__len__())
+                    save_state(step + epoch * len(train_loader))
                 else:
                     print("test loss got larger, no checkpoint will be saved")
-
-            for g in optimizer.param_groups:
-                g['lr'] = get_lr(step + epoch * train_loader.__len__())
+    test_loss = evaluate()
+    loss_history['test'].append(test_loss.detach().item())
+    if test_loss < best_loss + eval_tolerance or always_save_checkpoints:
+        best_loss = test_loss
+        save_state(step + epoch * len(train_loader))
+    else:
+        print("test loss got larger, no checkpoint will be saved")
 
 
 def param_count(module=model):

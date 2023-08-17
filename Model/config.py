@@ -1,5 +1,5 @@
 class params:
-    def __init__(self, embedding_dimension, n_heads, n_blocks, batchsize, context_length, device, vocab_size, dropout):
+    def __init__(self, embedding_dimension, n_heads, n_blocks, batchsize, context_length, device, vocab_size, dropout, task = "prediction"):
         self.embedding_dimension = embedding_dimension
         self.num_heads = n_heads
         self.head_size = batchsize // n_heads
@@ -9,3 +9,4 @@ class params:
         self.device = device
         self.vocab_size = vocab_size
         self.dropout = dropout
+        self.task = task

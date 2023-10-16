@@ -18,25 +18,23 @@ warnings.filterwarnings("ignore")
 
 context_dimension = 256  # 1024  # Time
 embedding_dimension = 768  # 192  # feature Channels (Should be multiple of num_heads)
-accumulation_steps = 1  # 2
+accumulation_steps = 1
 batch_size = 64 // accumulation_steps  # (micro)Batch 64
 num_heads = 12  # for multi-head Attention
 num_blocks = 12
 vocab_size = 50257
 
-model_name = '4set_owt_model'
-use_existing_model = False
+model_name = '10set_owt_model'
+use_existing_model = True #False#
 use_karpathy = False  # True
 compile_model = True
-# model_name = 'reg_shakespeare'
 
-# training_iterations = 5000  # 6000
-iteration_offset = 0
-epochs = 3
+epochs = 10
 num_workers = 4
 train_test_percentage = 0.995
 
-eval_interval = 2500  # 250 # 1000
+eval_interval = 500  # 250 # 1000
+plot_intervall = 100
 always_save_checkpoints = True
 eval_tolerance = 5e-2
 
@@ -47,7 +45,6 @@ grad_clip = 5.0
 learning_rate = 2.5e-4
 min_lr = 1e-5
 warmup_iterations = 400
-# lr_decay_iters = 50000  # training_iterations
 
 best_loss = 1e8
 
@@ -58,13 +55,6 @@ torch.set_float32_matmul_precision('high')
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
-# data = torch.load('Bookcorpus/bc1.pt').to(device)
-# data = torch.load('shakespeare_tokenized.pt').to(device)
-# print(data.shape)
-
-# train_split = data[:int(train_test_percentage * len(data))]
-# test_split = data[int(train_test_percentage * len(data)):]
-# print("data loaded")
 parameters = config.params(embedding_dimension, n_heads=num_heads, n_blocks=num_blocks,
                            batchsize=batch_size, context_length=context_dimension, vocab_size=vocab_size,
                            device=device, dropout=dropout)
@@ -78,25 +68,29 @@ if torch.cuda.is_available() and compile_model:
     print('compiling model')
     model = torch.compile(model)
 
-train_set = Data.Dataset(parameters, train=True, train_test_percentage=train_test_percentage)
-test_set = Data.Dataset(parameters, train=False, train_test_percentage=train_test_percentage)
-train_loader = DataLoader(train_set, batch_size=batch_size, num_workers=num_workers, pin_memory=True, shuffle=True)
-test_loader = DataLoader(test_set, batch_size=batch_size, num_workers=num_workers, pin_memory=True, shuffle=True)
+train_set, test_set = Data.Dataset(parameters, train=True, train_test_percentage=train_test_percentage), Data.Dataset(parameters, train=False, train_test_percentage=train_test_percentage)
+train_sampler, test_sampler = Data.ResumableSampler(len(train_set)), Data.ResumableSampler(len(test_set))
+train_loader, test_loader = DataLoader(train_set, batch_size=parameters.batchsize, num_workers=num_workers, pin_memory=True, sampler=train_sampler), DataLoader(test_set, batch_size=parameters.batchsize, num_workers=num_workers, pin_memory=True, sampler=test_sampler)#
+#TODO Check if sampler can be changed after loading in DataLoader
 
 model_params = filter(lambda p: p.requires_grad, model.parameters())
-optimizer = torch.optim.AdamW(model_params, learning_rate, (0.9, 0.95), weight_decay=weight_decay, foreach=False,
-                              fused=True)  # TODO Test if fused is good
+optimizer = torch.optim.AdamW(model_params, learning_rate, (0.9, 0.95), weight_decay=weight_decay, foreach=False, fused=True)  # TODO Test if fused is good
 scaler = GradScaler()
-loss_history = {"train": [], "test": [], "test_interval": eval_interval}
 
+loss_history = {"train": [], "test": [], "test_interval": eval_interval, "plot_interval": plot_intervall}
+start_iteration, start_epoch = 0, 0
 if use_existing_model:
-    state = torch.load('final_{}.pt'.format(model_name))
+    state = torch.load('{}.pt'.format(model_name))
     model.load_state_dict(state['state_dict'])
     optimizer.load_state_dict(state['optimizer'])
-    iteration_offset = state['iteration']
+    scaler.load_state_dict(state["GradScaler"])
+    train_sampler.set_state(state["samplers"]["train"])
+    test_sampler.set_state(state["samplers"]["test"])
+    start_iteration = state['iteration']
+    start_epoch = state['epoch']
     loss_history = state['loss_history']
 
-    print("Continuing from Model at iteration", iteration_offset, ", best test loss:", loss_history['test'][-1])
+    print("Continuing from Model at iteration {} in epoch {}".format(start_iteration, start_epoch))
 
 
 def get_lr(it):
@@ -117,28 +111,28 @@ def get_lr(it):
 def evaluate():
     model.eval()
     with torch.no_grad():
-        losses = torch.zeros(test_loader.__len__())
-        for k, batch in enumerate(test_loader):
-            X, Y = batch[0].to(device), batch[1].to(device)  # get_batch(test=True)
-            out = model(X)
+        losses = torch.zeros(len(test_loader))
+        for k, batch in enumerate(tqdm(test_loader, leave=False)):
+            x, y = batch[0].to(device), batch[1].to(device)  # get_batch(test=True)
+            out = model(x)
             B, T, vs = out.shape
-            loss = func.cross_entropy(out.view(B * T, vs), Y.view(B * T), ignore_index=-1)
+            loss = func.cross_entropy(out.view(B * T, vs), y.view(B * T), ignore_index=-1)
             losses[k] = loss.detach()  # Changed detach() and item()
     model.train()
     return losses.mean()
 
 
-def save_state(iteration, checkpoint=True):
+def save_state(iteration, epoch): #Checkpoint = True
     state_to_save = {
         "state_dict": model.state_dict(),
-        "iteration": iteration,
+        "iteration": iteration + start_iteration,
+        "epoch": epoch,
         "optimizer": optimizer.state_dict(),
+        "GradScaler": scaler.state_dict(),
+        "samplers": {"train": train_sampler.get_state(), "test": test_sampler.get_state()},
         "loss_history": loss_history
     }
-    if checkpoint:
-        torch.save(state_to_save, '{}.pt'.format(model_name))
-    else:
-        torch.save(state_to_save, 'final_{}.pt'.format(model_name))  # Used to save a model that may be overfitted
+    torch.save(state_to_save, '{}.pt'.format(model_name))
 
 
 def training_loop():  # iterations
@@ -146,35 +140,24 @@ def training_loop():  # iterations
 
     # with trange(iteration_offset, iterations, initial=iteration_offset, total=iterations) as t:
     batch_loss = 0
-    test_loss = torch.tensor(0)  # TODO Check if this is better on gpu or cpu
+    test_loss = 0 if len(loss_history['test'])==0 else loss_history['test'][-1] # TODO Check if this is better on gpu or cpu
     model.train()
-    for epoch in range(epochs):
-        for i, batch in enumerate(progressbar := tqdm(train_loader)):
+    for epoch in range(start_epoch, epochs):
+        for i, batch in enumerate(progressbar := tqdm(train_loader, initial=start_iteration, total = len(train_loader)+start_iteration)):
             step = i + epoch * len(train_loader)
             x, y = batch[0].to(device), batch[1].to(device)  # get_batch()
             with autocast(device_type='cuda', dtype=torch.float16, enabled=True):
                 out = model(x)
-
-                # print('x:', x)
-                # print('y:', y)
-                # print('pred:', )
-
-                assert (y != -1).any()
                 B, T, vs = out.shape
                 loss = func.cross_entropy(out.view(B * T, vs), y.view(B * T), ignore_index=-1) / accumulation_steps
-                del x
-                del y
-                del out
-                # loss = loss / accumulation_step
             scaler.scale(loss).backward()
             batch_loss += loss.detach()
-            del loss
+            del loss, x, y, out
 
             if ((step + 1) % accumulation_steps == 0) or (step + 1 == len(train_loader)):
-                if (step) % 10 == 0:
+                if step % plot_intervall == 0:
                     loss_history['train'].append(batch_loss.item())
-                    progressbar.set_postfix(
-                        {'train_loss': batch_loss.item(), 'test_loss': test_loss.item()})  # Changed Indentation
+                    progressbar.set_postfix({'train_loss': batch_loss.item(), 'test_loss': test_loss})  # Changed Indentation
                 if grad_clip != 0.0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
@@ -186,22 +169,14 @@ def training_loop():  # iterations
                 batch_loss = 0
 
             if (step + 1) % eval_interval == 0:
-                test_loss = evaluate()  # estimate_loss()
-                loss_history['test'].append(test_loss.detach().item())
-                # print("Iteration ", steps, " train loss: ", loss.item(), " test loss: ", test_loss.item())
+                test_loss = evaluate().detach().item()
+                loss_history['test'].append(test_loss)
                 # progressbar.set_postfix({'train_loss': loss.item(), 'test_loss': test_loss.item()})
-                if test_loss < best_loss + eval_tolerance or always_save_checkpoints:
+                if always_save_checkpoints or test_loss < best_loss + eval_tolerance:
                     best_loss = test_loss
-                    save_state(step + epoch * len(train_loader))
+                    save_state(i, epoch)
                 else:
                     print("test loss got larger, no checkpoint will be saved")
-    test_loss = evaluate()
-    loss_history['test'].append(test_loss.detach().item())
-    if test_loss < best_loss + eval_tolerance or always_save_checkpoints:
-        best_loss = test_loss
-        save_state(step + epoch * len(train_loader))
-    else:
-        print("test loss got larger, no checkpoint will be saved")
 
 
 def param_count(module=model):

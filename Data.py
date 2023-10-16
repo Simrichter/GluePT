@@ -4,6 +4,9 @@ import Model.config as config
 import Model.Embeddings as emb
 from tqdm import tqdm
 from datasets import load_dataset
+import numpy as np
+import torch.multiprocessing
+import os
 
 task_to_keys = {
     "cola": ("sentence", None),
@@ -36,7 +39,10 @@ class ExternalDataset(Dataset):
 
 class FinetuneData(Dataset):
     def __init__(self, task, split):
-        data_path = 'Glue/glue_{}.pt'.format(task)
+        data_path = f'Glue/glue_{task}.pt'
+        if not os.path.exists(data_path):
+            print(f"downloading {task}")
+            prepare_glue([task])
         self.data = torch.load(data_path)[split]
 
     def __len__(self):
@@ -51,12 +57,15 @@ class Dataset(Dataset):
 
     # dataset_path = 'shakespeare_tokenized.pt'
     def __init__(self, cfg, train, train_test_percentage):
+        torch.multiprocessing.set_sharing_strategy(
+            'file_system')  # Solves an error with multiple workers ("Bad file descriptor")
+
         ''' defines the amount of Samples per Sequence of size context_length
         (1 corresponds to no overlap between samples,
          2 will result in approximately half-context overlap,
          set to context_dimension for full overlap)'''
         overlap = 2
-        num_subsets = 4
+        num_subsets = 10
 
         dataset_paths = ['OpenWebText/owt_{}.pt'.format(i) for i in range(num_subsets)]  # 'Bookcorpus/bc1.pt'
 
@@ -77,6 +86,8 @@ class Dataset(Dataset):
         return self.length
 
     def __getitem__(self, i):
+        if i >= self.length:
+            print(f"i:{i}, len:{self.length}")
         assert 0 <= i < self.length
         index = min(i * self.stepSize, self.data.size()[0] - self.context_length - 1)
         # print(index)
@@ -86,14 +97,47 @@ class Dataset(Dataset):
         return x, y
 
 
+class ResumableSampler(torch.utils.data.Sampler):
+    def __init__(self, length):
+        self.offset = 0
+        self.length = length - self.offset
+
+        self.perm_index = -1
+        self.perm = torch.randperm(self.length, pin_memory=True, device='cpu')
+        # self.perm = self.perm.to('cpu')
+
+    def __iter__(self):
+        while self.perm_index < len(self.perm) - 1:
+            self.perm_index += 1
+            # self.log.append(self.perm[self.perm_index])
+            yield self.perm[self.perm_index]
+        self.length += self.offset
+        self.offset = 0
+        self.perm_index = -1
+        self.perm = torch.randperm(self.length, pin_memory=True, device='cpu')  # generator=self.generator
+
+    def __len__(self):
+        return self.length
+
+    def get_state(self):
+        return {"perm": self.perm}
+
+    def set_state(self, state, i):
+        self.perm = state["perm"]
+        self.perm_index = i - 1
+        self.offset = i  # state["perm_index"] if not self.perm_index >= len(self.perm) else -1
+        self.length = self.length - self.offset
+
+
 def prepare_owt():
     global task_to_keys
 
-    subset_ids = [i for i in range(3, 4)]
+    subset_ids = [i for i in range(4, 10)]
 
     for id in tqdm(subset_ids):
-        url = 'https://huggingface.co/datasets/Skylion007/openwebtext/resolve/refs%2Fconvert%2Fparquet/plain_text/partial/train/000{}.parquet'.format(
-            id)
+        # url = 'https://huggingface.co/datasets/Skylion007/openwebtext/resolve/main/subsets/urlsf_subset{}.tar'.format(str(id).zfill(2))
+        url = 'https://huggingface.co/datasets/Skylion007/openwebtext/resolve/refs%2Fconvert%2Fparquet/plain_text/partial-train/00{}.parquet'.format(
+            str(id).zfill(2))
         data = load_dataset("parquet", data_files={"train": url}, split="train")
         res = []
         for s in tqdm(data['text']):
@@ -101,11 +145,12 @@ def prepare_owt():
         torch.save(torch.cat(res), 'OpenWebText/owt_{}.pt'.format(id))
 
 
-def prepare_glue():
-    tasks = ['sst2']
-    splits = ['train', 'test', 'validation']
-
+def prepare_glue(tasks):
     for task in tasks:
+        if task == 'mnli':
+            splits = ['train', 'test_matched', 'test_mismatched', 'validation_matched', 'validation_mismatched']
+        else:
+            splits = ['train', 'test', 'validation']
         dataset = {}
         key_1, key_2 = task_to_keys[task]
         for split in splits:

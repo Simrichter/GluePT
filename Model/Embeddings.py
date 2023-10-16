@@ -23,7 +23,7 @@ def get_positional_encoding(cfg):
 
 
 def encode(text):
-    return tokenizer.encode(text)
+    return tokenizer.encode(text, allowed_special={'<|endoftext|>'})
 
 
 def decode(tokens):

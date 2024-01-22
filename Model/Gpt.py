@@ -11,16 +11,20 @@ class GptModel(nn.Module):
 
     def __init__(self, cfg):
         super().__init__()
-        self.use_gpt2 = cfg.use_gpt2  # False#True#
+        self.use_gpt2 = cfg.use_gpt2 #False#True#
         self.freeze_model = cfg.freeze_model
         self.device = cfg.device
         self.T = cfg.context_length
         self.task = cfg.task
 
+        
         if self.use_gpt2:
-            conf = GPT2Config(n_positions=cfg.context_length)
-            self.gpt2 = GPT2LMHeadModel(conf) if self.task == "prediction" else GPT2LMHeadModel.from_pretrained("gpt2")
+            conf = GPT2Config(n_positions = cfg.context_length, n_embd = cfg.embedding_dimension, n_layer=cfg.n_blocks, n_head=cfg.num_heads, resid_pdrop=cfg.dropout, embd_pdrop=cfg.dropout, attn_pdrop=cfg.dropout) # Translates the config into a GPT2 config
+            
+            self.gpt2 = GPT2LMHeadModel(conf) if self.task == "prediction" else GPT2LMHeadModel.from_pretrained(f"gpt2{'-medium' if cfg.embedding_dimension == 1024 else ''}")
             self.train()
+            
+            print("GPT2 model loaded")
         else:
             self.train()
             self.token_embedding = nn.Embedding(cfg.vocab_size,
@@ -30,9 +34,17 @@ class GptModel(nn.Module):
                 print("Using pre-trained Embedding weights from gpt2")
                 if not os.path.exists("Model/token_embedding_weights.pt"):
                     print("Downloading token_embedding_weights from gpt2")
-                    tew = GPT2Model.from_pretrained("gpt2").wte
+                    tew = GPT2Model.from_pretrained("gpt2").wte.weight
                     torch.save(tew, "Model/token_embedding_weights.pt")
                 self.token_embedding.weight = torch.load('Model/token_embedding_weights.pt')
+                self.token_embedding.weight.requires_grad = False
+            elif cfg.embedding_dimension == 1024:
+                print("Using pre-trained Embedding weights from gpt2 Medium")
+                if not os.path.exists("Model/token_embedding_weights_medium.pt"):
+                    print("Downloading token_embedding_weights from gpt2 Medium")
+                    tew = GPT2Model.from_pretrained("gpt2-medium").wte.weight
+                    torch.save(tew, "Model/token_embedding_weights_medium.pt")
+                self.token_embedding.weight = torch.load('Model/token_embedding_weights_medium.pt')
                 self.token_embedding.weight.requires_grad = False
 
             self.register_buffer('positional_embedding', Embeddings.get_positional_encoding(cfg))
@@ -50,15 +62,14 @@ class GptModel(nn.Module):
                 self.head.weight = self.token_embedding.weight  # should be no_grad through weight tying
         else:
             out_dim = 1 if self.task == "stsb" else 3 if "mnli" in self.task else 2
-            self.ft_head = nn.Linear(cfg.embedding_dimension, out_dim)
-
-            self.ft_head.weight = torch.nn.Parameter(self.ft_head.weight / 2)  # TODO check this mod
-            self.ft_head.bias = torch.nn.Parameter(self.ft_head.bias / 2)
-            # Different Name is used, so load_state_dict ignores the old language modelling head (strict=False)
+            self.ft_head = nn.Linear(cfg.embedding_dimension, out_dim) # Different Name is used for the head, so load_state_dict ignores the old language modelling head with (strict=False)
+            self.ft_head.weight = torch.nn.Parameter(self.ft_head.weight/2) #TODO check this mod
+            self.ft_head.bias = torch.nn.Parameter(self.ft_head.bias/2)
+            
 
     def forward(self, x):
         if self.use_gpt2:
-            x = self.gpt2(x, output_hidden_states=True).hidden_states[-1]  # .last_hidden_state
+            x = self.gpt2(x, output_hidden_states=True).hidden_states[-1] # .last_hidden_state
         else:
             if self.freeze_model:
                 self.eval()
@@ -70,17 +81,18 @@ class GptModel(nn.Module):
                 x = self.norm(self.blocks(x))
             self.train()
 
-        if not self.task == "prediction":  # When Finetuning only the last position in context_dim is forwarded to the head, because it holds the ful information
-            # print(f"shape of x is: {x[:, -1:, :].shape}")
+
+        if not self.task == "prediction": # When Finetuning only the last position in context_dim is forwarded to the head, because it holds the ful information
+            #print(f"shape of x is: {x[:, -1:, :].shape}")
             out = self.ft_head(x[:, -1:, :])
             return out
-        return self.head(x)  # x.logits#
+        return self.head(x)#x.logits#
 
     def generate(self, x, max_length, temperature=1.0):
         for i in range(max_length):
             logits = self(x.view(1, -1)[:, -self.T:])
-            # print(logits.shape)
-            # logits = logits[:, -1, :] / temperature  # .view(-1) TODO is temperature needed?
+            #print(logits.shape)
+            #logits = logits[:, -1, :] / temperature  # .view(-1) TODO is temperature needed?
             logits = logits.view(-1, 50257)
             probs = func.softmax(logits, dim=-1)
             print(probs.shape)
@@ -127,23 +139,23 @@ class Multi_head_attention(nn.Module):
         self.n_head = nh
         self.scale_factor = 1 / math.sqrt(hs)
         self.dropout = cfg.dropout
-        # self.bias = cfg.bias
+        #self.bias = cfg.bias
 
-        self.c_attn = nn.Linear(C, 3 * C, bias=cfg.bias)  # TODO set Bias True (or not? not really common)
+        self.c_attn = nn.Linear(C, 3 * C, bias=cfg.bias) # TODO set Bias True (or not? not really common)
         # stdv = 1 / torch.sqrt(torch.tensor(C)) # Used to imitate the standard initialization of a linear layer
         # self.W_q = nn.Parameter(nn.init.uniform_(torch.empty(nh, C, hs), a=-stdv, b=stdv))
         # self.W_k = nn.Parameter(nn.init.uniform_(torch.empty(nh, C, hs), a=-stdv, b=stdv))
         # self.W_v = nn.Parameter(nn.init.uniform_(torch.empty(nh, C, hs), a=-stdv, b=stdv))
-        # if cfg.bias:
+        #if cfg.bias:
         #    self.B_q = nn.Parameter
 
         self.linear = nn.Linear(C, C)
         # scaled initialization of residual layers (same as above)
-        torch.nn.init.normal_(self.linear.weight, 0, 0.02 / math.sqrt(2 * cfg.n_blocks))
+        torch.nn.init.normal_(self.linear.weight, 0, 0.02/math.sqrt(2*cfg.n_blocks))
 
-        self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
-        if not self.flash:
-            # causal mask to ensure that attention is only applied to the left in the input sequence
+        self.sdp = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
+        if not self.sdp:
+            # causal mask to ensure that attention is only applied to the left in the input sequence TODO ist der satz meiner?
             self.register_buffer('low_tri', torch.tril(torch.ones(T, T)).view(1, 1, T, T))
             print('Manual attention implementation will be used, might produce NaNs in combination with AMP')
         self.drop = nn.Dropout(cfg.dropout)
@@ -162,19 +174,18 @@ class Multi_head_attention(nn.Module):
         Q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         V = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
 
-        if self.flash:
-            # efficient attention using Flash Attention CUDA kernels
-            result = torch.nn.functional.scaled_dot_product_attention(Q, K, V, attn_mask=None,
-                                                                      dropout_p=self.dropout if self.training else 0,
-                                                                      is_causal=True)
+        if self.sdp:
+            # using the torch implementation of self attention
+            result = torch.nn.functional.scaled_dot_product_attention(Q, K, V, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
-            score = torch.matmul(Q, K.transpose(-2,
-                                                -1)) * self.scale_factor  # / Q.size(-1) ** 0.5#self.context_length ** 0.5
+            # manual implementation of self attention
+            score = torch.matmul(Q, K.transpose(-2, -1)) * self.scale_factor  # / Q.size(-1) ** 0.5#self.context_length ** 0.5
             weight = score.masked_fill(self.low_tri[:, :, :T, :T] == 0, float('-inf'))
             soft_score = torch.softmax(weight, dim=-1)
             result = torch.matmul(soft_score, V)  # shape: (B, num_head T, head_size)
+            result = self.drop(result)
 
         res = result.transpose(1, 2).reshape(B, T, C)
         res = self.linear(res)
-        res = self.drop(res)
+        
         return res

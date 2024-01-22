@@ -13,3 +13,12 @@ class params:
         self.bias = bias
         self.use_gpt2 = use_gpt2
         self.freeze_model=freeze_model
+
+        
+class small_model (params):
+    def __init__(self, batchsize, context_length, device, dropout, task="prediction", bias=True, use_gpt2=False, freeze_model=False):
+        params.__init__(self, embedding_dimension=768, n_heads=12, n_blocks=12, batchsize=batchsize, context_length=context_length, device=device, vocab_size=50257, dropout=dropout, task=task, bias=bias, use_gpt2=use_gpt2, freeze_model=freeze_model)
+        
+class large_model (params):
+    def __init__(self, batchsize, context_length, device, dropout, task="prediction", bias=True, use_gpt2=False, freeze_model=False):
+        params.__init__(self, embedding_dimension=1024, n_heads=16, n_blocks=24, batchsize=batchsize, context_length=context_length, device=device, vocab_size=50257, dropout=dropout, task=task, bias=bias, use_gpt2=use_gpt2, freeze_model=freeze_model)

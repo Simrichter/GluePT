@@ -1,10 +1,8 @@
 import torch
 from torch.utils.data import Dataset
-import Model.config as config
 import Model.Embeddings as emb
 from tqdm import tqdm
 from datasets import load_dataset
-import numpy as np
 import torch.multiprocessing
 import os
 
@@ -53,23 +51,24 @@ class FinetuneData(Dataset):
 class Dataset(Dataset): #TODO eventuell um
 
     # dataset_path = 'shakespeare_tokenized.pt'
-    def __init__(self, cfg, train, train_test_percentage):
-        torch.multiprocessing.set_sharing_strategy('file_system') # Solves an error with multiple workers ("Bad file descriptor")
-        
-        ''' defines the amount of Samples per Sequence of size context_length
+    def __init__(self, T, train, num_subsets, train_test_percentage=0.995, overlap = 2):
+        ''' Overlap defines the amount of Samples per Sequence of size context_length
         (1 corresponds to no overlap between samples,
          2 will result in approximately half-context overlap,
          set to context_dimension for full overlap)'''
-        overlap = 2
-        num_subsets = 10
-
-        dataset_paths = ['OpenWebText/owt_{}.pt'.format(i) for i in range(num_subsets)]  # 'Bookcorpus/bc1.pt'
-
-        self.context_length = cfg.context_length
-        self.stepSize = cfg.context_length // overlap
         
-        print("loading {} {} subsets".format(num_subsets, 'training' if train else 'validation'))
-        self.tensors = [torch.load(path, map_location=torch.device('cpu')) for path in tqdm(dataset_paths)]
+        torch.multiprocessing.set_sharing_strategy('file_system') # Solves an error with multiple workers ("Bad file descriptor")
+        
+
+        dataset_paths = ['OpenWebText/owt_{}.pt'.format(i) for i in range(num_subsets)]
+
+        self.context_length = T
+        self.stepSize = T // overlap
+        
+        if train:
+            print(f"Using {num_subsets} OpenWebText subset{'s' if num_subsets>1 else ''}")
+        prepare_owt(end=num_subsets) # Download owt files if not already done
+        self.tensors = [torch.load(path, map_location=torch.device('cpu')) for path in dataset_paths]
 
         # splits the test part of the end of each individual file and concatenates the resulting tensor
         self.data = torch.cat( [data[:int(train_test_percentage * len(data))] if train else data[int(train_test_percentage * len(data)):] for data in self.tensors] )
@@ -84,10 +83,7 @@ class Dataset(Dataset): #TODO eventuell um
             print(f"i:{i}, len:{self.length}")
         assert 0 <= i < self.length
         index = min(i * self.stepSize, self.data.size()[0] - self.context_length - 1)
-        # print(index)
-        # print(self.data[0:1])
         x, y = self.data[index: (index + self.context_length)], self.data[index + 1:index + self.context_length + 1]
-        # print(index)
         return x, y
     
     
@@ -97,18 +93,16 @@ class ResumableSampler(torch.utils.data.Sampler):
         self.length = length-self.offset
 
         self.perm_index = -1
-        self.perm = torch.randperm(self.length, pin_memory=True, device='cpu')
-        #self.perm = self.perm.to('cpu')
+        self.perm = torch.randperm(self.length, pin_memory=torch.cuda.is_available(), device='cpu')
 
     def __iter__(self):
         while self.perm_index < len(self.perm)-1:
             self.perm_index += 1
-            #self.log.append(self.perm[self.perm_index])
             yield self.perm[self.perm_index]
         self.length += self.offset
         self.offset = 0
         self.perm_index = -1
-        self.perm = torch.randperm(self.length, pin_memory=True, device='cpu')#generator=self.generator
+        self.perm = torch.randperm(self.length, pin_memory=torch.cuda.is_available(), device='cpu')
 
     def __len__(self):
         return self.length
@@ -123,22 +117,26 @@ class ResumableSampler(torch.utils.data.Sampler):
         self.length = self.length - self.offset
 
 
-def prepare_owt():
+def prepare_owt(start=0, end=10):
     global task_to_keys
     
-    subset_ids = [i for i in range(4, 10)]
+    subset_ids = [i for i in range(start, end)]
 
-    for id in tqdm(subset_ids):
-        #url = 'https://huggingface.co/datasets/Skylion007/openwebtext/resolve/main/subsets/urlsf_subset{}.tar'.format(str(id).zfill(2))
-        url = 'https://huggingface.co/datasets/Skylion007/openwebtext/resolve/refs%2Fconvert%2Fparquet/plain_text/partial-train/00{}.parquet'.format(str(id).zfill(2))
-        data = load_dataset("parquet", data_files={"train": url}, split="train")
-        res = []
-        for s in tqdm(data['text']):
-            res.append(torch.tensor(emb.encode(s)))
-        torch.save(torch.cat(res), 'OpenWebText/owt_{}.pt'.format(id))
+    for id in subset_ids:
+        if not os.path.exists(f'OpenWebText/owt_{id}.pt'):
+            print(f"Downloading OpenWebText subset {id}")
+            url = 'https://huggingface.co/datasets/Skylion007/openwebtext/resolve/refs%2Fconvert%2Fparquet/plain_text/partial-train/00{}.parquet'.format(str(id).zfill(2))
+            data = load_dataset("parquet", data_files={"train": url}, split="train")
+            res = []
+            for s in data['text']:
+                res.append(torch.tensor(emb.encode(s)))
+            if not os.path.exists("OpenWebText"):
+                os.mkdir("OpenWebText")
+            torch.save(torch.cat(res), 'OpenWebText/owt_{}.pt'.format(id))
         
 def prepare_glue(tasks):
-    
+    if not os.path.exists("Glue"):
+        os.mkdir("Glue")    
 
     for task in tasks:
         if task == 'mnli':
@@ -157,5 +155,3 @@ def prepare_glue(tasks):
                 res.append([x, torch.tensor([sample['label']])])
             dataset[split]=res
         torch.save(dataset, 'Glue/glue_{}.pt'.format(task))
-#prepare_glue()
-#prepare_owt()

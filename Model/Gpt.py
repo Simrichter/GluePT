@@ -107,7 +107,6 @@ class GptModel(nn.Module):
 
                 x = self.norm(self.blocks(x))
             self.train()
-
         
         # Pretraining and finetuning heads are named differently ( to make loading a checkpoint easier).
         if self.task == "pretraining":
@@ -119,7 +118,7 @@ class GptModel(nn.Module):
 
     # This method allows to sample text from the GPT model.
     # x is the input that will be continued with max_length token.
-    # If x is/grows larger than the maximum sequence length, the GPT is trained for, only the last T token are taken into account.
+    # If x is/grows larger than the maximum sequence length of the GPT, only the last T_{max} token are taken into account.
     def generate(self, x, max_length):
         if not self.hasattr("head") or self.head.weight.shape[1]!=50257 or self.task != "pretraining":
             print("Error: Output head is not suitable for text generation tasks")

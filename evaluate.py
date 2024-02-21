@@ -36,9 +36,10 @@ def prepare_x(x, task):
         else:
             return x
 
-def evaluate_GLUE(model, device, epoch, task, freeze_model=False):
+def evaluate_GLUE(model, epoch):
     # Loads the test datasets for the task
     # MNLI has two test datasets (matched and mismatched)
+    task = model.task
     if task == 'mnli-m':
         test_data = Data.FinetuneData('mnli', 'test_matched')
     elif task == 'mnli-mm':
@@ -144,7 +145,7 @@ def evaluate(models, tasks, gpu_num, select_epochs='last', evaluate_detailed=Fal
                 for task in tasks:
                     if task.get('freeze_model', False):
                         freezed = True
-                    model, _ = Gpt.create_model(model_name, e, device, task, eval=True, **task)
+                    model, _ = Gpt.create_model(model_name, e, device, eval=True, **task)
                     evaluate_GLUE(model, device, e, task)
             print(f"Creating zip...")
             create_zip(f"({e}){model_name}", freezed)

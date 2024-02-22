@@ -152,12 +152,14 @@ def finetune_model(model, device, pretrain_epoch, task_name, batch_size=32, epoc
     batch_loss = 0
     test_loss = torch.tensor(0)
 
-    limit = len(train_loader) # The limit can be used for 
+    # If a float between 0 and 1 is given as the number of epochs, this code calculates the iteration, at which the finetuning should be terminated
+    # This allows to train for a fraction of an epoch
+    limit = len(train_loader)
     if epochs < 1 and epochs >=0:
         limit = epochs*len(train_loader)
         epochs = 1 # Set epochs to the next larger integer value to start training
     elif not isinstance(epochs, int):
-        print("Error, epoch must be an integer, or a float in the intervall [0, 1)")
+        print("Error, epoch must be either a float in the intervall [0, 1), or an integer")
     
     # This loop repeats for every epoch
     for epoch in range(epochs):
@@ -251,9 +253,10 @@ def check_best(model_name, pretrain_epoch, task_name, freeze_model=False):
         os.rename(temp_path, best_path)
         print("New best model found\n")
 
-def finetune(models, tasks, gpu_num, select_epochs='last', finetune_detailed=False):
+def finetune(models, tasks, gpu_num, select_epochs='last'):
     device = torch.device(f'cuda:{gpu_num}') if torch.cuda.is_available() else 'cpu'
     for m in models:
+        finetune_detailed = m.get("detailed", False)
         if select_epochs=='custom':
             if not 'finetuning_epochs' in m:
                 print("!!ERROR!!\nepoch selection strategy 'custom' requires the key 'finetuning_epochs' in the 'models' dictionary")
@@ -274,6 +277,6 @@ def finetune(models, tasks, gpu_num, select_epochs='last', finetune_detailed=Fal
             for task in tasks:
                 for trie in range(task.get('tries', 1)):
                     print(f"{task['task_name']} try: {trie}")
-                    model, _ = Gpt.create_model(m['name'], e, device, **task)
-                    finetune_model(model, device, e, **m['kwargs'], **task) # , task['task_name']
+                    model, _ = Gpt.create_model(m['name'], e, device, compile_model=False, **task)
+                    finetune_model(model, device, e, **task)
                     check_best(m['name'], e, task['task_name'], model.freeze)

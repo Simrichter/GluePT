@@ -45,24 +45,6 @@ class GptModel(nn.Module):
                 self.token_embedding.weight = tew
                 self.token_embedding.weight.requires_grad = False
 
-            # if cfg.embedding_dimension == 768: # Load from GPT2-small
-            #     print("Using pre-trained Embedding weights from gpt2")
-            #     if not os.path.exists("Model/token_embedding_weights.pt"):
-            #         print("Downloading token_embedding_weights from gpt2")
-            #         tew = GPT2Model.from_pretrained("gpt2").wte.weight
-            #         torch.save(tew, "Model/token_embedding_weights.pt")
-            #     self.token_embedding.weight = torch.load('Model/token_embedding_weights.pt')
-            #     self.token_embedding.weight.requires_grad = False
-
-            # elif cfg.embedding_dimension == 1024: # Load from GPT2-medium
-            #     print("Using pre-trained Embedding weights from gpt2 Medium")
-            #     if not os.path.exists("Model/token_embedding_weights_medium.pt"):
-            #         print("Downloading token_embedding_weights from gpt2 Medium")
-            #         tew = GPT2Model.from_pretrained("gpt2-medium").wte.weight
-            #         torch.save(tew, "Model/token_embedding_weights_medium.pt")
-            #     self.token_embedding.weight = torch.load('Model/token_embedding_weights_medium.pt')
-            #     self.token_embedding.weight.requires_grad = False
-
             # Prepare a position embedding matrix capable of encoding cfg.context_length positions
             self.register_buffer('positional_embedding', Embeddings.get_positional_encoding(cfg))
 
@@ -84,7 +66,7 @@ class GptModel(nn.Module):
             else:
                 self.head.weight = self.token_embedding.weight
         else:
-            out_dim = 1 if self.task == "stsb" else 3 if "mnli" in self.task else 2
+            out_dim = 1 if self.task == "stsb" else 3 if (self.task =="ax" or "mnli" in self.task) else 2
             self.ft_head = nn.Linear(cfg.embedding_dimension, out_dim) # Different Name is used for the head, so load_state_dict ignores the old language modelling head with (strict=False)
             self.ft_head.weight = torch.nn.Parameter(self.ft_head.weight/2) #TODO check this mod
             self.ft_head.bias = torch.nn.Parameter(self.ft_head.bias/2)
@@ -234,37 +216,42 @@ class Multi_head_attention(nn.Module):
 # This function is used to create a PyTorch GPT model
 # The standard setups for small and large model as well as the corresponding GPT2 sizes are used as presets, otherwise default values are used.
 # Loading weights from existing checkpoints and optionally compiling the model is also handled in this function
-def create_model(model_name, epoch, device, task_name, dropout=0.0, compile_model=False, eval=False, embedding_dimension=768, num_heads=6, num_blocks=6, vocab_size=50257, context_dimension=256, bias=False, freeze_model=False, batch_size=256, **kwargs):
-    if model_name=='small_model':
+def create_model(name, max_epochs, device, task_name, dropout=0.0, compile_model=True, evaluate=False, embedding_dimension=768, num_heads=6, num_blocks=6, vocab_size=50257, context_dimension=256, bias=False, freeze_model=False, batch_size=256, **kwargs):
+    if name=='small_model':
         parameters = config.small_model(batchsize=batch_size, context_length=context_dimension, device=device, dropout=dropout, task=task_name, freeze_model=freeze_model, **kwargs)
-    elif model_name=='large_model':
+    elif name=='large_model':
         parameters = config.large_model(batchsize=batch_size, context_length=context_dimension, device=device, dropout=dropout, task=task_name, freeze_model=freeze_model, **kwargs)
-    elif model_name=='gpt2_small':
+    elif name=='gpt2_small':
         parameters = config.small_model(batchsize=batch_size, context_length=context_dimension, device=device, dropout=dropout, task=task_name, freeze_model=freeze_model, use_gpt2=True, **kwargs)
-    elif model_name=='gpt2_medium':
+    elif name=='gpt2_medium':
         parameters = config.large_model(batchsize=batch_size, context_length=context_dimension, device=device, dropout=dropout, task=task_name, freeze_model=freeze_model, use_gpt2=True, **kwargs)
     else:                
         parameters = config.params(embedding_dimension=embedding_dimension, n_heads=num_heads, n_blocks=num_blocks, batchsize=batch_size, context_length=context_dimension, vocab_size=vocab_size, device=device, dropout=dropout, task=task_name, bias=bias, freeze_model=freeze_model, use_gpt2=False, **kwargs)
     
-    model = GptModel(parameters, model_name).to(device)
+    model = GptModel(parameters, name).to(device)
     if torch.cuda.is_available() and compile_model:
         print('compiling model')
         model = torch.compile(model)
+        
+    file_task_name = 'mnli' if 'mnli' in task_name or task_name == 'ax' else task_name 
     
-    path_to_checkpoint = f"Checkpoints/{model_name}/{model_name}.pt" if task_name=='pretraining' else (f"FinetunedModels/{model_name}/({epoch}){model_name}/{task_name}_({epoch}){model_name}.pt" if eval else f"Checkpoints/{model_name}/({epoch}){model_name}.pt" )
-    use_existing_model = os.path.exists(path_to_checkpoint)
+    path_to_checkpoint = f"Checkpoints/{name}/{name}.pt" if task_name=='pretraining' else (f"FinetunedModels/{name}/({max_epochs}){name}/{file_task_name}_({max_epochs}){name}.pt" if evaluate else f"Checkpoints/{name}/({max_epochs}){name}.pt" )
+    use_existing_model = os.path.exists(path_to_checkpoint) and not parameters.use_gpt2
     if use_existing_model:
-            state = torch.load(path_to_checkpoint, map_location=device)
-            if torch.cuda.is_available() and compile_model:
-                sd = state["state_dict"]
-            else:# This part is used if torch.compile is not available. Compiling a model adds a prefix to the names of the weights
-                sd = {k.removeprefix('_orig_mod.'): v for k, v in state["state_dict"].items()}  # remove '_orig_mod.' prefix to allow loading to an uncompiled Model
+        state = torch.load(path_to_checkpoint, map_location=device)
+        if torch.cuda.is_available() and compile_model:
+            sd = state["state_dict"]
+        else:# This part is used if torch.compile is not available. Compiling a model adds a prefix to the names of the weights
+            # remove '_orig_mod.' prefix to allow loading to an uncompiled Model
+            sd = {k.removeprefix('_orig_mod.'): v for k, v in state["state_dict"].items()}
 
-            model.load_state_dict(sd, strict=False)
-            print(f"Model ({epoch}){model_name} successfully loaded")
+        model.load_state_dict(sd, strict=False)
+        print(f"Model ({max_epochs}){name} successfully loaded")
     elif not parameters.use_gpt2:
         if task_name != 'pretraining':
-            print("!!WARNING!!")
+            print("!!ERROR!!")
             print(f"Could not find model at path {path_to_checkpoint}")
+            print("Finetuning requires an existing checkpoint")
+            return
         print("No model checkpoint loaded")
     return model, (state if "state" in locals() else None)

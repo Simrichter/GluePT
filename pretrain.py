@@ -84,8 +84,9 @@ def evaluate(model, device, test_loader, train_set, micro_batch_size, num_worker
     model.train()
     return losses['train'].mean().item(), losses['test'].mean().item()
 
-def train(model, state, epochs, device, num_subsets, detailed = False, batch_size=256, accumulation_steps=4, max_lr = 2.5e-4, min_lr=1e-5, n_workers=3, evals_per_epoch=10, plot_interval = 100, stop_time=None, weight_decay=1e-2, grad_clip=1.0):
-
+def train(model, state, epochs, device, num_subsets, detailed = False, batch_size=256, accumulation_steps=4, max_lr = 2.5e-4, min_lr=1e-5, n_workers=3, evals_per_epoch=20, plot_interval = 100, stop_time=None, weight_decay=1e-2, grad_clip=1.0, **kwargs):
+    
+    
     if detailed and evals_per_epoch<10:
         print("At least 10 evaluations per epoch are necessary for detailed mode, setting has been updated accordingly")
         evals_per_epoch = 10
@@ -164,13 +165,14 @@ def train(model, state, epochs, device, num_subsets, detailed = False, batch_siz
         loss_history['test'].append(test_loss)
         loss_history['train'].append(train_loss)
         save_state(0, model, optimizer, scaler, train_sampler, test_sampler, 0, len(train_loader), loss_history, detailed, name_prefix="(0)")
+        
 
     # This loop repeats for every epoch
     for epoch in range(start_epoch, epochs):
 
         # This loop repeats for every batch. Tqdm library is used for displaying a progress bar
         for i, multi_batch in enumerate(progressbar := tqdm(train_loader, desc=f'epoch {epoch}', initial = start_iteration, total=len(train_loader) + start_iteration, colour='cyan')):
-            
+                        
             # Stops training if a given timestamp is reached. Used to stop when the end of a reserved GPU timeslot is reached.
             if isinstance(stop_time, datetime.datetime) and datetime.datetime.now() >= stop_time:
                 break
@@ -217,6 +219,7 @@ def train(model, state, epochs, device, num_subsets, detailed = False, batch_siz
                 loss_history['train'].append(train_loss)
                 progressbar.set_postfix({'running_loss': batch_loss.item(), 'train_loss': train_loss,'test_loss': test_loss})
                 save_state(i+1+start_iteration, model, optimizer, scaler, train_sampler, test_sampler, epoch, len(train_loader)+start_iteration, loss_history, detailed)
+                break # TODO
 
             # Update the progress bar after a certain interval
             if (step+1) % plot_interval == 0:
@@ -246,6 +249,9 @@ def param_count(model):
 def pretrain(models, gpu_num, num_subsets=10, stop_time=None):
     device = torch.device(f'cuda:{gpu_num}') if torch.cuda.is_available() else 'cpu'
     for model in models:
-        m, state = Gpt.create_model(model['name'], model['max_epochs'], device, task_name='pretraining', amp_active=torch.cuda.is_available(), kwargs=model['kwargs'])
+        # m, state = Gpt.create_model(model['name'], model['max_epochs'], device, task_name='pretraining', amp_active=torch.cuda.is_available(), kwargs=model['kwargs'])
+        if 'gpt2' in model['name']:
+            continue
+        m, state = Gpt.create_model(device=device, task_name='pretraining', amp_active=torch.cuda.is_available(), **model)
         print(f"The model has {param_count(m):,} learnable parameters")
-        train(m, state, model['max_epochs'], device, num_subsets, stop_time=stop_time, **model['kwargs'])
+        train(model=m, state=state, epochs=model['max_epochs'], device=device, num_subsets=num_subsets, stop_time=stop_time, **model)

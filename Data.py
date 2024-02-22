@@ -17,6 +17,7 @@ task_to_keys = {
     "sst2": ("sentence", None),
     "stsb": ("sentence1", "sentence2"),
     "wnli": ("sentence1", "sentence2"),
+    "ax": ("premise", "hypothesis")
 }
 
 class ExternalDataset(Dataset):
@@ -141,6 +142,8 @@ def prepare_glue(tasks):
     for task in tasks:
         if task == 'mnli':
             splits = ['train', 'test_matched', 'test_mismatched', 'validation_matched', 'validation_mismatched']
+        elif task == 'ax':
+            splits = ['test']
         else:
             splits = ['train', 'test', 'validation']
         dataset = {}

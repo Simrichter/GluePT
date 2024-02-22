@@ -12,7 +12,7 @@ num_workers = 4
 
 # A dict used to translate our task names to the file names required for a submission to GLUE
 file_names = {'cola': 'CoLA', 'stsb': 'STS-B', 'sst2': 'SST-2', 'wnli': 'WNLI', 'rte': 'RTE', 'qnli': 'QNLI',
-              'mrpc': 'MRPC', 'qqp': 'QQP', 'mnli-m': 'MNLI-m', 'mnli-mm': 'MNLI-mm'}
+              'mrpc': 'MRPC', 'qqp': 'QQP', 'mnli-m': 'MNLI-m', 'mnli-mm': 'MNLI-mm', 'ax':"AX"}
 
 # This dict stores the required number of predictions. It is used to check if all test samples have been labeled before creating the zip
 task_sizes = {'CoLA': 1063, 'STS-B': 1379, 'SST-2': 1821, 'WNLI': 146, 'RTE': 3000, 'QNLI': 5463, 'MRPC': 1725,
@@ -20,7 +20,7 @@ task_sizes = {'CoLA': 1063, 'STS-B': 1379, 'SST-2': 1821, 'WNLI': 146, 'RTE': 30
 
 # This function translates the numerical label assigned by the model into word labels, which are expected on some of the GLUE tasks
 def translate_pred(x, task):
-        if 'mnli' in task:
+        if 'mnli' in task or task =="ax":
             return "entailment" if x == 0 else ("neutral" if x == 1 else "contradiction")
         if task in ["rte", "qnli"]:
             return "entailment" if x == 0 else "not_entailment"
@@ -31,12 +31,12 @@ def prepare_x(x, task):
             x2 = torch.cat((x[1], x[0]), dim=1)
             x = torch.cat((x[0], x[1]), dim=1)
             return x, x2
-        elif task in ['wnli', 'rte', 'qnli', 'mrpc', 'qqp', 'mnli-m', 'mnli-mm']:
+        elif task in ['wnli', 'rte', 'qnli', 'mrpc', 'qqp', 'mnli-m', 'mnli-mm', 'ax']:
             return torch.cat((x[0], x[1]), dim=1)
         else:
             return x
 
-def evaluate_GLUE(model, epoch):
+def evaluate_GLUE(model, epoch, device):
     # Loads the test datasets for the task
     # MNLI has two test datasets (matched and mismatched)
     task = model.task
@@ -106,23 +106,45 @@ def create_zip(model_name, freeze_model=False):
     shutil.make_archive(f"Zip-Out/{'freezed_'if freeze_model else ''}{model_name}", "zip", f"Predictions/{'freezed_'if freeze_model else ''}{model_name}")
 
 
-# This function collects the validation scores of the last evaluation of the finetuning.
-# Assuming the validation and test sets to be similar, this gives a rough estimation of what the test scores might look like.
-# However, the results are too optimistic, since the models with the best validation score are chosen during finetuning.
-def estimate(model_name, epoch, task, freeze_model=False):
-    if 'mnli' in task:  # On MNLI, we evaluate only on the matched set during finetuning, because the mismatched set yields very similar results
-        task = 'mnli'
-    state = torch.load(f"FinetunedModels/{model_name}/({epoch}){model_name}/{'freezed_'if freeze_model else ''}{task}_({epoch}){model_name}.pt", map_location='cpu')
-    keys = state['score_history'][0].keys()
-    scores = {k: [s[k] for s in state['score_history']] for k in keys}
-    res = [scores[k][-1] for k in keys]
-    return res
+# # This function collects the validation scores of the last evaluation of the finetuning.
+# # Assuming the validation and test sets to be similar, this gives a rough estimation of what the test scores might look like.
+# # However, the results are too optimistic, since the models with the best validation score are chosen during finetuning.
+# def estimate(model_name, epoch, task, freeze_model=False):
+#     if 'mnli' in task:  # On MNLI, we evaluate only on the matched set during finetuning, because the mismatched set yields very similar results
+#         task = 'mnli'
+#     state = torch.load(f"FinetunedModels/{model_name}/({epoch}){model_name}/{'freezed_'if freeze_model else ''}{task}_({epoch}){model_name}.pt", map_location='cpu')
+#     keys = state['score_history'][0].keys()
+#     scores = {k: [s[k] for s in state['score_history']] for k in keys}
+#     res = [scores[k][-1] for k in keys]
+#     return res
 
 
-def evaluate(models, tasks, gpu_num, select_epochs='last', evaluate_detailed=False, zip_only=False):
-    device = torch.device(f'cuda:{gpu_num}') if torch.cuda.is_available() else 'cpu'
+def evaluate(models, tasks, gpu_num, select_epochs='last', evaluate_detailed=False, zip_only=False, validation_only=False):
+    
+    device = torch.device(f'cuda:{gpu_num}') if torch.cuda.is_available() and not validation_only else 'cpu'
+
+    # At first, the task list needs a few modifications
+    # If mnli is in the tasks list, it is replaced by mnli-m and mnli-mm
+    mnli_entries = [t for t in tasks if t['task_name'] == "mnli"]
+    if len(mnli_entries) >0:
+        tasks = [t for t in tasks if t['task_name'] != "mnli"]
+        for entry in mnli_entries:
+            entry["task_name"]="mnli-m"
+            tasks.append(entry)
+            cop = entry.copy()
+            cop["task_name"]="mnli-mm"
+            tasks.append(cop)
+    
+    # The diagnostic task "ax" contains only a test set and is provided as an analysis tool by GLUE
+    # The GLUE authors evaluate on it using the MNLI classifier. We follow this practice
+    if not "ax" in [t for t in tasks if t['task_name']]:
+        tasks.append({"task_name":"ax", "ax":True})
+        
+    val_data = {}
+
     for m in models:
         model_name=m['name']
+        val_data[model_name]={}
         if select_epochs=='custom':
             if not 'finetuning_epochs' in m:
                 print("!!ERROR!!\nepoch selection strategy 'custom' requires the key 'finetuning_epochs' in the 'models' dictionary")
@@ -139,13 +161,29 @@ def evaluate(models, tasks, gpu_num, select_epochs='last', evaluate_detailed=Fal
             print(f"!!ERROR!!\nepoch selection strategy '{select_epochs}' is unknown.\n Choose one of 'custom', 'all', 'last'")
             return
         for e in epochs:
+            val_data[model_name][e]={}
+            freeze = any([t.get('freeze_model', False) for t in tasks])
             if not zip_only:
                 print(f"Evaluating model ({e}){model_name}")
-                freezed = False
                 for task in tasks:
-                    if task.get('freeze_model', False):
-                        freezed = True
-                    model, _ = Gpt.create_model(model_name, e, device, eval=True, **task)
-                    evaluate_GLUE(model, device, e, task)
-            print(f"Creating zip...")
-            create_zip(f"({e}){model_name}", freezed)
+                    model, state = Gpt.create_model(model_name, e, device, evaluate=True, **task)
+                    if not task['task_name'] == "ax":
+                        val_data[model_name][e][task['task_name']] = state["score_history"][-1]
+                    if not validation_only:
+                        evaluate_GLUE(model, e, device)
+            if not validation_only:
+                print(f"Creating zip...")
+                create_zip(f"({e}){model_name}", freeze)
+    
+    for name, epoch in val_data.items():
+        print(f"\n\n\n_______________________________\n{name}:\n_______________________________\n")
+        # print(epoch)
+        l =  list(list(epoch.values())[0].keys())
+        for t in l:
+            metrics = ", ".join(list(list(epoch.values())[0][t].keys()))
+            print(f"{t} ({metrics})\n----------------------------------")
+            for e, s in epoch.items():
+                score_string = ', '.join([f"{(score*100):.2f}" for score in s[t].values()])
+                print(f"{e}: {score_string}")
+            print("")
+            

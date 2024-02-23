@@ -26,6 +26,7 @@ def translate_pred(x, task):
             return "entailment" if x == 0 else "not_entailment"
         return x
 
+# If a sample contains more than one input sentece, this function concatenates them depending on the task
 def prepare_x(x, task):
         if task == "stsb":
             x2 = torch.cat((x[1], x[0]), dim=1)
@@ -36,9 +37,10 @@ def prepare_x(x, task):
         else:
             return x
 
+# This function evaluates the given model on a GLUE task's test set.
+# The labels are saved in .tsv files
 def evaluate_GLUE(model, epoch, device):
-    # Loads the test datasets for the task
-    # MNLI has two test datasets (matched and mismatched)
+    # Loads the needed test dataset for the task
     task = model.task
     if task == 'mnli-m':
         test_data = Data.FinetuneData('mnli', 'test_matched')
@@ -65,10 +67,8 @@ def evaluate_GLUE(model, epoch, device):
             out += out2
             del out2
             out = torch.clamp(out, min=0, max=5) # Even though STS-B is a regression task, it's outputs must lie in the interval [0,5]. Therefore we clamp all larger or smaller values
-
-        # For all other tasks, an argmax is used for sampling a label.
         else:
-            out = torch.argmax(model(x.to(device)))
+            out = torch.argmax(model(x.to(device))) # For all other tasks, an argmax is used for sampling a label.
 
         preds.append(translate_pred(out.item(), task))
 
@@ -85,10 +85,10 @@ def evaluate_GLUE(model, epoch, device):
 
 # This method is used to create a zip file ready to be uploaded to "https://gluebenchmark.com/submit"
 def create_zip(model_name, freeze_model=False):
-    needed_files = ['QQP.tsv', 'CoLA.tsv', 'RTE.tsv', 'MNLI-m.tsv', 'QNLI.tsv', 'MNLI-mm.tsv', 'AX.tsv', 'WNLI.tsv', 'STS-B.tsv', 'SST-2.tsv', 'MRPC.tsv']# os.listdir("Predictions/Example_submission_Glue")
+    needed_files = ['QQP.tsv', 'CoLA.tsv', 'RTE.tsv', 'MNLI-m.tsv', 'QNLI.tsv', 'MNLI-mm.tsv', 'AX.tsv', 'WNLI.tsv', 'STS-B.tsv', 'SST-2.tsv', 'MRPC.tsv']
     actual_files = os.listdir(f"Predictions/{'freezed_'if freeze_model else ''}{model_name}")
     for nf in needed_files:
-        # Check if the file is present in the "Predictions" folder. If a file is missing, the GLUE website will reject the submission
+        # Check if all required files are present in the "Predictions" folder. If a file is missing, the GLUE website will reject the submission
         if nf not in actual_files:
             print(f"!!ERROR!!\nFile '{nf}' not found in folder 'Predictions'\nA submission to GLUE requires all files")
             return
@@ -105,22 +105,11 @@ def create_zip(model_name, freeze_model=False):
     # Finally, the zip file is created and placed in the folder "Zip-Out"
     shutil.make_archive(f"Zip-Out/{'freezed_'if freeze_model else ''}{model_name}", "zip", f"Predictions/{'freezed_'if freeze_model else ''}{model_name}")
 
-
-# # This function collects the validation scores of the last evaluation of the finetuning.
-# # Assuming the validation and test sets to be similar, this gives a rough estimation of what the test scores might look like.
-# # However, the results are too optimistic, since the models with the best validation score are chosen during finetuning.
-# def estimate(model_name, epoch, task, freeze_model=False):
-#     if 'mnli' in task:  # On MNLI, we evaluate only on the matched set during finetuning, because the mismatched set yields very similar results
-#         task = 'mnli'
-#     state = torch.load(f"FinetunedModels/{model_name}/({epoch}){model_name}/{'freezed_'if freeze_model else ''}{task}_({epoch}){model_name}.pt", map_location='cpu')
-#     keys = state['score_history'][0].keys()
-#     scores = {k: [s[k] for s in state['score_history']] for k in keys}
-#     res = [scores[k][-1] for k in keys]
-#     return res
-
-
+# This function manages the evaluation process for all given models and tasks
+# Additionally, an overview over the reached validation scores during finetuning is printed in the console
+# zip_only=True will only zip the existing .tsv files
+# validation_only=True will only print the overview of the validation scores without creating .tsv files or a zip
 def evaluate(models, tasks, gpu_num, select_epochs='last', evaluate_detailed=False, zip_only=False, validation_only=False):
-    
     device = torch.device(f'cuda:{gpu_num}') if torch.cuda.is_available() and not validation_only else 'cpu'
 
     # At first, the task list needs a few modifications
@@ -142,6 +131,7 @@ def evaluate(models, tasks, gpu_num, select_epochs='last', evaluate_detailed=Fal
         
     val_data = {}
 
+    # Create a list of all epoch checkpoints to evaluate on
     for m in models:
         model_name=m['name']
         val_data[model_name]={}
@@ -160,14 +150,16 @@ def evaluate(models, tasks, gpu_num, select_epochs='last', evaluate_detailed=Fal
         else:
             print(f"!!ERROR!!\nepoch selection strategy '{select_epochs}' is unknown.\n Choose one of 'custom', 'all', 'last'")
             return
+        
         for e in epochs:
             val_data[model_name][e]={}
             freeze = any([t.get('freeze_model', False) for t in tasks])
             if not zip_only:
                 print(f"Evaluating model ({e}){model_name}")
                 for task in tasks:
-                    model, state = Gpt.create_model(model_name, e, device, evaluate=True, **task)
-                    if not task['task_name'] == "ax":
+                    model, state = Gpt.create_model(epoch=e, device=device,task_name=task['task_name'], evaluate=True, **m)
+                    if not task['task_name'] == "ax" and state is not None:
+                        # Collect validation scores in a dict for later printing
                         val_data[model_name][e][task['task_name']] = state["score_history"][-1]
                     if not validation_only:
                         evaluate_GLUE(model, e, device)
@@ -175,9 +167,9 @@ def evaluate(models, tasks, gpu_num, select_epochs='last', evaluate_detailed=Fal
                 print(f"Creating zip...")
                 create_zip(f"({e}){model_name}", freeze)
     
+    # Prints the collected validation scores to the console
     for name, epoch in val_data.items():
         print(f"\n\n\n_______________________________\n{name}:\n_______________________________\n")
-        # print(epoch)
         l =  list(list(epoch.values())[0].keys())
         for t in l:
             metrics = ", ".join(list(list(epoch.values())[0][t].keys()))

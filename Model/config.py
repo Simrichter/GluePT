@@ -1,5 +1,4 @@
-
-# This class holds variables used for creating and training the models
+# This class holds variables used for creating the models
 class params:
     def __init__(self, embedding_dimension, n_heads, n_blocks, batchsize, context_length, device, vocab_size, dropout, task="prediction", bias=True, use_gpt2=False, freeze_model=False, efficient_implementation=True, **kwargs):
         self.embedding_dimension = embedding_dimension

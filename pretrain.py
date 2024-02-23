@@ -10,6 +10,7 @@ from torch.nn import functional as func
 import os
 import datetime
 
+# This function calculates the learning rate for the given iteration based on a cosine decay schedule with warmup
 def get_lr(it, total_iters, max_lr, min_lr):
         warmup_iterations = 4000 # This number is drawn from "Attention is all you need" Paper
         # warmup
@@ -22,6 +23,7 @@ def get_lr(it, total_iters, max_lr, min_lr):
         if it > total_iters:
             return min_lr
 
+# This function saves a checkpoint of the model together with the loss history and the state dicts of optimizer, gradient scaler and the dataset samplers
 def save_state(iteration, model, optimizer, scaler, train_sampler, test_sampler, epoch, epoch_length, loss_history, detailed, name_prefix = ""):
         state_to_save = {
             "state_dict": model.state_dict(),
@@ -56,14 +58,14 @@ def save_state(iteration, model, optimizer, scaler, train_sampler, test_sampler,
         # Always save a checkpoint without name prefix, which represents the most recent state. It is used to resume training.
         torch.save(state_to_save, f"{path}/{model.name}.pt")
 
+# This function evaluates the model on the held out test part of OpenWebText
 def evaluate(model, device, test_loader, train_set, micro_batch_size, num_workers):
     eval_iters=len(test_loader)
     model.eval()
     with torch.no_grad():
-        # print("Length of the test_loader is:", len(test_loader))
         losses = {'test': torch.zeros(eval_iters), 'train': torch.zeros(eval_iters+1)}
 
-        # Evaluates on the validation set
+        # Evaluates on the test set
         for k, batch in enumerate(tqdm(test_loader, leave=False, desc='evaluating Test', colour='yellow')):
             x, y = batch[0].to(device), batch[1].to(device)
             out = model(x)
@@ -71,7 +73,7 @@ def evaluate(model, device, test_loader, train_set, micro_batch_size, num_worker
             loss = func.cross_entropy(out.view(B * T, vs), y.view(B * T), ignore_index=-1)  # ignore last index in the calculation of the loss, as it does not have a label
             losses['test'][k] = loss.detach()
 
-        # Evaluates on random data from the train set (Gives a loss curve that is not affected by dropout and other training artifacts)
+        # Also evaluate on random data from the train set (Gives a loss curve that is not affected by dropout and other training artifacts)
         eval_train_loader = DataLoader(train_set, batch_size=micro_batch_size, num_workers=num_workers, pin_memory=torch.cuda.is_available(), shuffle=True)
         for k, batch in enumerate(tqdm(eval_train_loader, total=eval_iters, leave=False, desc='evaluating Train', colour='yellow')):
             x, y = batch[0].to(device), batch[1].to(device)
@@ -79,13 +81,13 @@ def evaluate(model, device, test_loader, train_set, micro_batch_size, num_worker
             B, T, vs = out.shape
             loss = func.cross_entropy(out.view(B * T, vs), y.view(B * T), ignore_index=-1)  # ignore last index
             losses['train'][k] = loss.detach() 
-            if k >= eval_iters: # Used to limit the evaluation on the training set to roughly the same scope as the evaluation on test
+            if k >= eval_iters: # Used to limit the evaluation on the training set to the same extent as the evaluation on test
                 break
     model.train()
     return losses['train'].mean().item(), losses['test'].mean().item()
 
+# This function pretrains the given model
 def train(model, state, epochs, device, num_subsets, detailed = False, batch_size=256, accumulation_steps=4, max_lr = 2.5e-4, min_lr=1e-5, n_workers=3, evals_per_epoch=20, plot_interval = 100, stop_time=None, weight_decay=1e-2, grad_clip=1.0, **kwargs):
-    
     
     if detailed and evals_per_epoch<10:
         print("At least 10 evaluations per epoch are necessary for detailed mode, setting has been updated accordingly")
@@ -97,7 +99,7 @@ def train(model, state, epochs, device, num_subsets, detailed = False, batch_siz
     assert batch_size%accumulation_steps==0, "Batch size must be divisible by the number of accumulation steps"
     micro_batch_size=batch_size//accumulation_steps
 
-    # performance optimizations
+    # Performance optimizations
     torch.set_float32_matmul_precision('high')
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -142,12 +144,9 @@ def train(model, state, epochs, device, num_subsets, detailed = False, batch_siz
         scaler.load_state_dict(state["GradScaler"])
         train_sampler.set_state(state["samplers"]["train"], (start_iteration)*batch_size)
         test_sampler.set_state(state["samplers"]["test"], -1)
-        
         loss_history = state['loss_history']
 
         print(f"Continuing at iteration {start_iteration} in epoch {start_epoch}")
-
-    # begin = 0 if start_iteration <= 0 else start_iteration + 1 # An offset when starting from a checkpoint
 
     # Variables used for displaying in the progress bar
     train_loss = loss_history['train'][-1] if len(loss_history['train']) > 0 else 0
@@ -219,7 +218,6 @@ def train(model, state, epochs, device, num_subsets, detailed = False, batch_siz
                 loss_history['train'].append(train_loss)
                 progressbar.set_postfix({'running_loss': batch_loss.item(), 'train_loss': train_loss,'test_loss': test_loss})
                 save_state(i+1+start_iteration, model, optimizer, scaler, train_sampler, test_sampler, epoch, len(train_loader)+start_iteration, loss_history, detailed)
-                break # TODO
 
             # Update the progress bar after a certain interval
             if (step+1) % plot_interval == 0:
@@ -239,7 +237,7 @@ def train(model, state, epochs, device, num_subsets, detailed = False, batch_siz
             continue # Skips the following line
         break # This is used to propagate a break in the inner loop to the outer loop
 
-# Counts all learnable parameters of a model to give an idea of a model's size
+# Counts all learnable parameters of a model to print the model's size
 def param_count(model):
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
     params = sum([torch.prod(torch.tensor(p.size())) for p in model_parameters])
@@ -249,9 +247,8 @@ def param_count(model):
 def pretrain(models, gpu_num, num_subsets=10, stop_time=None):
     device = torch.device(f'cuda:{gpu_num}') if torch.cuda.is_available() else 'cpu'
     for model in models:
-        # m, state = Gpt.create_model(model['name'], model['max_epochs'], device, task_name='pretraining', amp_active=torch.cuda.is_available(), kwargs=model['kwargs'])
         if 'gpt2' in model['name']:
-            continue
-        m, state = Gpt.create_model(device=device, task_name='pretraining', amp_active=torch.cuda.is_available(), **model)
+            continue # We do not want to pretrain GPT2, since we use the already trained version
+        m, state = Gpt.create_model(epoch=model['max_epochs'], device=device, task_name='pretraining', amp_active=torch.cuda.is_available(), **model)
         print(f"The model has {param_count(m):,} learnable parameters")
         train(model=m, state=state, epochs=model['max_epochs'], device=device, num_subsets=num_subsets, stop_time=stop_time, **model)

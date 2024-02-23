@@ -13,6 +13,7 @@ from statistics import mean
 import Data
 import os
 
+# Calculates the learning rate for the given iteration based on a linear decay schedule with warmup
 def get_lr(it, total_iters, max_lr, min_lr):
             warmup = total_iters * 0.002
             if it < warmup:
@@ -21,6 +22,7 @@ def get_lr(it, total_iters, max_lr, min_lr):
                 return min_lr
             return (max_lr - min_lr) * (1 - (it - warmup) / (total_iters - warmup)) + min_lr
 
+# If a sample contains more than one input sentece, this function concatenates them depending on the task
 def prepare_x(x, task_name):
             if task_name == "stsb":
                 x2 = torch.cat((x[1], x[0]), dim=1)
@@ -39,7 +41,8 @@ def loss_fn(out, y, task_name):
                 return func.mse_loss(out.view(B * T, vs), y, reduction='mean')
             else:
                 return func.cross_entropy(out.view(B * T, vs), y.view(B * T))
-            
+
+# This function evaluates the model on the validation set of a task
 def evaluate(model, task_name, test_loader, metric, score_history, device):
     model.eval()
     with torch.no_grad():
@@ -79,7 +82,8 @@ def evaluate(model, task_name, test_loader, metric, score_history, device):
         score_history.append(score)
         model.train()
         return torch.tensor(losses).mean().detach()
-    
+
+# This function saves a checkpoint of the model together with the score history
 def save_state(iteration, model, task_name, pretrain_epoch, optimizer, loss_history, score_history):
         state_to_save = {
             "state_dict": model.state_dict(),
@@ -97,13 +101,14 @@ def save_state(iteration, model, task_name, pretrain_epoch, optimizer, loss_hist
         file_path = f"{path}/TEMP_{'freezed_' if model.freeze else ''}{task_name}_({pretrain_epoch}){model.name}.pt"
         torch.save(state_to_save, file_path)
 
+# This function finetunes the given model on a given task
 def finetune_model(model, device, pretrain_epoch, task_name, batch_size=32, epochs=3, eval_interval = 50, plot_interval = 1, weight_decay = 1e-2, grad_clip = 1.0, max_lr = 5e-5, min_lr = 0, num_workers = 3, **kwargs):
 
     # Because the samples differ in length, we do not batch multiple samples together, but perform an individual forward pass for each sample. The use of gradient accumulation results in a training behaviour as if training happened on actual batches
     micro_batch_size = 1
     accumulation_steps = batch_size 
 
-    # performance optimizations
+    # Performance optimizations
     torch.set_float32_matmul_precision('high')
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
@@ -185,7 +190,7 @@ def finetune_model(model, device, pretrain_epoch, task_name, batch_size=32, epoc
                 else:
                     out = model(x.to(device))
                 loss = loss_fn(out, y, task_name) / accumulation_steps
-                # stop training if there is something wrong
+                # stop training if there is something wrong (Overflow / Underflow)
                 assert not math.isnan(loss), f"Encountered a NaN loss, aborting the {task_name}-finetuning"
 
                 batch_loss += loss.item() # Collecting the losses for display in the progress bar
@@ -234,6 +239,7 @@ def finetune_model(model, device, pretrain_epoch, task_name, batch_size=32, epoc
         
 # This function checks if the currently trained checkpoint (temp) is better than the previous best (best).
 # If that is the case or no previous checkpoint exists, the current checkpoint is renamed
+# This functionality is used when performing multiple tries of finetuning in order to stabilize the results
 def check_best(model_name, pretrain_epoch, task_name, freeze_model=False):
      # Checking, if the finetuned model is better or worse than any previous finetuning
     folder = f"FinetunedModels/{model_name}/({pretrain_epoch}){model_name}"
@@ -253,9 +259,11 @@ def check_best(model_name, pretrain_epoch, task_name, freeze_model=False):
         os.rename(temp_path, best_path)
         print("New best model found\n")
 
+# This function manages the finetuning for a list of models and a list of tasks
 def finetune(models, tasks, gpu_num, select_epochs='last'):
     device = torch.device(f'cuda:{gpu_num}') if torch.cuda.is_available() else 'cpu'
     for m in models:
+        # Creates a list of pretraining checkpoints that should be finetuned
         finetune_detailed = m.get("detailed", False)
         if select_epochs=='custom':
             if not 'finetuning_epochs' in m:
@@ -277,6 +285,6 @@ def finetune(models, tasks, gpu_num, select_epochs='last'):
             for task in tasks:
                 for trie in range(task.get('tries', 1)):
                     print(f"{task['task_name']} try: {trie}")
-                    model, _ = Gpt.create_model(m['name'], e, device, compile_model=False, **task)
+                    model, _ = Gpt.create_model(epoch=e, device=device, task_name=task['task_name'], **m)
                     finetune_model(model, device, e, **task)
                     check_best(m['name'], e, task['task_name'], model.freeze)

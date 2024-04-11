@@ -1,6 +1,6 @@
 ## GluePT
 This Project was created as part of my bachelor thesis at TU Dortmund.
-For an in-depth explanation of Generative Pretrained Transformers regarding their architecture, use-cases and implementation, as well as the results my models achieved, have a look at my thesis.
+For an in-depth explanation of Generative Pretrained Transformers regarding their architecture, use-cases and implementation, as well as the results my models achieved, have a look at my [thesis](An_Empircial_Analysis_of_Self-built_GPT_Models_for_GLUE_Task_Performance_-_Simon_Richter.pdf).
 
 The code resembles a complete pipeline for pretraining GPT models on subsets of the [OpenWebText](https://huggingface.co/datasets/Skylion007/openwebtext) dataset and finetuning them to the nine tasks of the [GLUE benchmark](gluebenchmark.com).
 Evaluation, plotting and creating the zip files necessary for submissions to the benchmark is also possible.

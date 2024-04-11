@@ -24,4 +24,5 @@ Using smaller models can also reduce both memory-usage and compute-time, however
 
 ## License
 This Code is distributed under the MIT License. See `License.txt` for more information.
+
 If you use any of my code, I would be happy to know what it is used for. So please let me know :)

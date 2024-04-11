@@ -23,6 +23,6 @@ This will reduce memory consumption by using smaller training batches. It will n
 Using smaller models can also reduce both memory-usage and compute-time, however using too small GPT models will result in poor performance on the benchmark.
 
 ## License
-This Code is distributed under the MIT License. See `License.txt` for more information.
+This Code is distributed under the MIT License. See [`LICENSE.txt`](LICENSE.txt) for more information.
 
 If you use any of my code, I would be happy to know what it is used for. So please let me know :)
